@@ -1,0 +1,144 @@
+using StatsBase, HypothesisTests
+
+function analyze_combined(kls::Vector{Vector{Float64}}, dics::Vector{Vector{Float64}})
+    n_kls = length(kls)
+    n_dics = length(dics)
+
+    best_kl = nothing
+    best_dic = nothing
+    best_kl_idx = nothing
+    best_dic_idx = nothing
+    significant_kl_idx = nothing
+    significant_dic_idx = nothing
+
+    # Analyze sequential pairs within kls
+    println("--- Comparing sequential pairs within kls ---")
+    for i in 1:n_kls-1
+        result_kl = MannWhitneyUTest(kls[i], kls[i+1])
+        p_value_kl = pvalue(result_kl)
+        
+        println("Mann-Whitney U Test between kl$(i) and kl$(i+1): p-value = ", p_value_kl)
+        
+        if p_value_kl < 0.1
+            println("Statistically significant difference detected.")
+            if median(kls[i]) < median(kls[i+1])
+                println("kl$(i+1) has a higher median.")
+                best_kl = kls[i+1]
+                best_kl_idx = i+1
+            else
+                println("kl$(i) has a higher median.")
+                best_kl = kls[i]
+                best_kl_idx = i
+            end
+            significant_kl_idx = best_kl_idx
+            break  # Stop after finding the first significant KL
+        else
+            println("No significant difference detected.")
+        end
+        println()
+    end
+
+    # Analyze sequential pairs within dics
+    println("--- Comparing sequential pairs within dics ---")
+    for i in 1:n_dics-1
+        result_dic = MannWhitneyUTest(dics[i], dics[i+1])
+        p_value_dic = pvalue(result_dic)
+        
+        println("Mann-Whitney U Test between dic$(i) and dic$(i+1): p-value = ", p_value_dic)
+        
+        if p_value_dic < 0.1
+            println("Statistically significant difference detected.")
+            if median(dics[i]) < median(dics[i+1])
+                println("dic$(i) has a lower median.")
+                best_dic = dics[i]
+                best_dic_idx = i
+            else
+                println("dic$(i+1) has a lower median.")
+                best_dic = dics[i+1]
+                best_dic_idx = i+1
+            end
+            significant_dic_idx = best_dic_idx
+            break  # Stop after finding the first significant DIC
+        else
+            println("No significant difference detected.")
+        end
+        println()
+    end
+
+    # Compare all combinations of kls
+    println("--- Comparing all combinations of kls ---")
+    for i in 1:n_kls
+        for j in 1:n_kls
+            if i != j
+                result = MannWhitneyUTest(kls[i], kls[j])
+                p_value = pvalue(result)
+
+                println("Mann-Whitney U Test between kl$(i) and kl$(j): p-value = ", p_value)
+
+                if p_value < 0.1
+                    println("Statistically significant difference detected.")
+                    if median(kls[i]) < median(kls[j])
+                        println("kl$(j) has a higher median.")
+                        best_kl = kls[j]
+                        best_kl_idx = j
+                    else
+                        println("kl$(i) has a higher median.")
+                        best_kl = kls[i]
+                        best_kl_idx = i
+                    end
+                    break  # Stop after finding the first significant KL
+                else
+                    println("No significant difference detected.")
+                end
+                println()
+            end
+        end
+    end
+
+    # Compare all combinations of dics
+    println("--- Comparing all combinations of dics ---")
+    for i in 1:n_dics
+        for j in 1:n_dics
+            if i != j
+                result = MannWhitneyUTest(dics[i], dics[j])
+                p_value = pvalue(result)
+
+                println("Mann-Whitney U Test between dic$(i) and dic$(j): p-value = ", p_value)
+
+                if p_value < 0.1
+                    println("Statistically significant difference detected.")
+                    if median(dics[i]) < median(dics[j])
+                        println("dic$(i) has a lower median.")
+                        best_dic = dics[i]
+                        best_dic_idx = i
+                    else
+                        println("dic$(j) has a lower median.")
+                        best_dic = dics[j]
+                        best_dic_idx = j
+                    end
+                    break  # Stop after finding the first significant DIC
+                else
+                    println("No significant difference detected.")
+                end
+                println()
+            end
+        end
+    end
+
+    # Determine best choice based on analysis
+    if significant_kl_idx !== nothing && significant_dic_idx !== nothing && significant_kl_idx == significant_dic_idx
+        println("Both KL and DIC are statistically significant at the same index $(significant_kl_idx).")
+        println("KL and DIC for index $(significant_kl_idx):")
+        println("KL: kl$(significant_kl_idx)")
+        println("DIC: dic$(significant_dic_idx)")
+    elseif best_kl !== nothing
+        println("KL is statistically significant.")
+        println("Best KL: kl$(best_kl_idx)")
+    elseif best_dic !== nothing
+        println("DIC is statistically significant.")
+        println("Best DIC: dic$(best_dic_idx)")
+    else
+        println("No significant information for both KL and DIC.")
+    end
+end
+
