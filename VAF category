@@ -1,0 +1,112 @@
+using DataFrames
+
+#Assume we are in Design 2
+
+# Create the DataFrame
+data = DataFrame(date=[0, 24, 42, 56, 74, 143, 234, 388, 507, 690, 781, 904, 1090, 1466, 1613, 1788 , 1923 , 2003 ,2134,2395,2594,2677,2829,2910,3000],
+                 dosage=[33.75, 45.0, 67.5, 90, 90, 135.0, 135.0, 180.0, 180.0, 180.0, 180.0, 180.0, 90.0, 67.5, 45.0, 33.75,45.0 , 45.0,45.0 ,45.0,45.0,45.0,45.0,45.0,45.0])
+
+data.dosage[data.date .>= 42] .= 90
+
+# Define the behavior categories
+function categorize_VAF(vaf_samples::Vector{Vector{Float64}})
+    categories = Vector{String}()
+    for vaf in vaf_samples
+        # Extract relevant VAF segments
+        initial_vaf = vaf[1:30]
+        vaf_1 = vaf[1]
+        vaf_40_50 = vaf[40:50]
+
+        vaf_40_100 = vaf[40:100]
+        vaf_100_200 = vaf[100:200]
+        vaf_200_300 = vaf[200:300]
+
+        vaf_2900_3000 = vaf[2900:3000]
+        vaf_200_500 = vaf[200:500]
+        vaf_0_30 = vaf[1:30]
+        vaf_0_150 = vaf[1:150]
+        vaf_500_600 = vaf[500:600]
+        vaf_600_800 = vaf[600:800]
+  
+        vaf_1000_3000 = vaf[1000:3000]
+
+        # Helper functions to check specific patterns
+        function is_increased_over_time()
+            mean(initial_vaf) < mean(vaf_2900_3000)
+        end
+
+        function is_reduced_high_rate()
+           mean(vaf_40_100) > mean(vaf_200_300) && mean(vaf_200_300) - mean(vaf_500_600) >= 0.20 
+        end
+
+        function is_reduced_small_rate1()
+          mean(vaf_40_100) > mean(vaf_200_300) &&   mean(vaf_200_300) - mean(vaf_500_600) < 0.20 &&  mean(vaf_40_50) - mean(vaf_1) <0.1 
+        end
+
+        function is_reduced_small_rate2()
+          mean(vaf_40_100) > mean(vaf_200_300) &&   mean(vaf_200_300) - mean(vaf_500_600) < 0.20 &&  mean(vaf_40_50) - mean(vaf_1) >0.1 
+        end
+
+        function is_increased_then_reduced_high()
+            mean(vaf_40_100) < mean(vaf_200_300) && mean(vaf_500_600) - mean(vaf_600_800) >= 0.20
+        end
+
+        function is_increased_then_reduced_small()
+            mean(vaf_40_100) < mean(vaf_200_300) && mean(vaf_500_600) - mean(vaf_600_800) < 0.20
+        end
+
+        # Check behavior patterns
+        if is_increased_over_time()
+            push!(categories, "Increased over time")
+        elseif is_reduced_high_rate()
+            push!(categories, "Reduced over time with high rate")
+        elseif is_reduced_small_rate1()
+            push!(categories, "Reduced over time with small rate / no bell")
+        elseif is_reduced_small_rate2()
+            push!(categories, "Reduced over time with small rate / bell")
+        elseif is_increased_then_reduced_high()
+            push!(categories, "Increased for some time and then reduced with high rate")
+        elseif is_increased_then_reduced_small()
+            push!(categories, "Increased for some time and then reduced with small rate")
+        else
+            push!(categories, "Unknown")
+        end
+    end
+    return categories
+end
+
+
+
+
+function categorize_VAF_from_theta(theta_r::Tuple)
+    # Compute VAF using the provided theta_r
+    solution = computationnel_model_with_posology(theta_r, collect(0:3000), collect(0:3000), data)
+    synth_VAF = solution[3]
+    
+    synth_VAF = Vector{Float64}(synth_VAF)
+
+    # Categorize VAF
+    categories = categorize_VAF([synth_VAF])
+    
+    return categories
+end
+
+
+
+# Generate random values for parameters
+km_hom_r = rand(Uniform(1, 20))
+gamma_hom_ifn_r = rand(Uniform(1.0/300.0, 0.1))
+gamma_het_ifn_r = rand(Uniform(1.0/300.0, 0.1))
+eta_het_r = rand(Uniform(0, 3))
+eta_hom_r = rand(Uniform(0, 3))
+Delta_hom_ini_r = rand(Uniform(0.0, 0.5))
+Delta_het_ini_r = rand(Uniform(0.0, 0.5))
+rho_Delta_hom_r = rand(Uniform(0.0, 10.0))
+rho_Delta_het_r = rand(Uniform(0.0, 10.0))
+
+theta_r = km_hom_r, eta_hom_r, eta_het_r, gamma_hom_ifn_r, gamma_het_ifn_r, Delta_hom_ini_r, Delta_het_ini_r, rho_Delta_hom_r, rho_Delta_het_r
+
+category = categorize_VAF_from_theta(theta_r)
+
+
+println("The VAF category is: $category")
