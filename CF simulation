@@ -1,0 +1,512 @@
+using Turing
+using Plots
+using CSV, DataFrames, Random
+using Statistics  
+using Distributions, QuadGK
+using StatsBase
+
+vaf_category = []
+best_dataset = []     
+best_combined_crps = []
+
+resultsCF = DataFrame(
+    Category = [],
+    Dataset = [],
+    CRPS = [])
+
+
+include("model_poso.jl") 
+
+
+# Define the behavior categories
+function categorize_VAF(vaf_samples::Vector{Vector{Float64}})
+    categories = Vector{String}()
+    for vaf in vaf_samples
+        # Extract relevant VAF segments
+        initial_vaf = vaf[1:30]
+        vaf_1 = vaf[1]
+        vaf_40_50 = vaf[40:50]
+
+        vaf_40_100 = vaf[40:100]
+        vaf_100_200 = vaf[100:200]
+        vaf_200_300 = vaf[200:300]
+
+        vaf_2900_3000 = vaf[900:1000]
+        vaf_200_500 = vaf[200:500]
+        vaf_0_30 = vaf[1:30]
+        vaf_0_150 = vaf[1:150]
+        vaf_500_600 = vaf[500:600]
+        vaf_600_800 = vaf[600:800]
+  
+       
+
+        # Helper functions to check specific patterns
+        function is_increased_over_time()
+            mean(initial_vaf) < mean(vaf_2900_3000)
+        end
+
+        function is_reduced_high_rate()
+           mean(vaf_40_100) > mean(vaf_200_300) && mean(vaf_200_300) - mean(vaf_500_600) >= 0.20 
+        end
+
+        function is_reduced_small_rate1()
+          mean(vaf_40_100) > mean(vaf_200_300) &&   mean(vaf_200_300) - mean(vaf_500_600) < 0.20 &&  mean(vaf_40_50) - mean(vaf_1) <0.1 
+        end
+
+        function is_reduced_small_rate2()
+          mean(vaf_40_100) > mean(vaf_200_300) &&   mean(vaf_200_300) - mean(vaf_500_600) < 0.20 &&  mean(vaf_40_50) - mean(vaf_1) >0.1 
+        end
+
+        function is_increased_then_reduced_high()
+            mean(vaf_40_100) < mean(vaf_200_300) && mean(vaf_500_600) - mean(vaf_600_800) >= 0.20
+        end
+
+        function is_increased_then_reduced_small()
+            mean(vaf_40_100) < mean(vaf_200_300) && mean(vaf_500_600) - mean(vaf_600_800) < 0.20
+        end
+
+        # Check behavior patterns
+        if is_increased_over_time()
+            push!(categories, "Increased over time")
+        elseif is_reduced_high_rate()
+            push!(categories, "Reduced over time with high rate")
+        elseif is_reduced_small_rate1()
+            push!(categories, "Reduced over time with small rate / no bell")
+        elseif is_reduced_small_rate2()
+            push!(categories, "Reduced over time with small rate / bell")
+        elseif is_increased_then_reduced_high()
+            push!(categories, "Increased for some time and then reduced with high rate")
+        elseif is_increased_then_reduced_small()
+            push!(categories, "Increased for some time and then reduced with small rate")
+        else
+            push!(categories, "Unknown")
+        end
+    end
+    return categories
+end
+
+
+function categorize_VAF_from_theta(theta_r::NTuple{9,Float64},data)
+    # Compute VAF using the provided theta_r
+    solution = computationnel_model_with_posology(theta_r, collect(1:1000), collect(1:1000), data)
+    synth_VAF = solution[3]
+    
+    synth_VAF = Vector{Float64}(synth_VAF)
+
+    # Categorize VAF
+    categories = categorize_VAF([synth_VAF])
+    
+    return categories
+end
+
+    @model function inferring_MPN_dynamics(CF_het, CF_hom, VAF, obs_time_progenitor, obs_time_mature, change_posology, homClones=true)
+      ### Parameters ###
+      km_hom ~ Uniform(1, 20)
+      gamma_hom_ifn ~ Uniform(1.0/300.0, 0.1)
+      gamma_het_ifn ~ Uniform(1.0/300.0, 0.1)
+      eta_het ~ Uniform(0, 3)
+      eta_hom ~ Uniform(0, 3)
+      Delta_hom_ini ~ Uniform(0.0, 0.5)
+      Delta_het_ini ~ Uniform(0.0, 0.5)
+      rho_Delta_hom ~ Uniform(0.0, 10.0)
+      rho_Delta_het ~ Uniform(0.0, 10.0)
+        
+      theta = km_hom, eta_hom, eta_het, gamma_hom_ifn, gamma_het_ifn, Delta_hom_ini, Delta_het_ini, rho_Delta_hom, rho_Delta_het
+    
+      ### Compute theoretical dynamics ###
+      solution = computationnel_model_with_posology(theta, obs_time_progenitor, obs_time_mature, data)
+    
+      model_CF_het = solution[1]
+      model_CF_hom = solution[2]
+      model_VAF_mat = solution[3]
+        
+      ### Statistical model ###
+      sigma_i ~ Uniform(0.0, 2.0)
+      sigma_m ~ Uniform(0.0, 2.0)
+        
+      for i in eachindex(CF_het)
+          CF_het[i] ~ Normal(model_CF_het[i], sigma_i)
+      end
+        
+      for i in eachindex(CF_hom)
+          CF_hom[i] ~ Normal(model_CF_hom[i], sigma_i)
+      end
+    
+      for i in eachindex(VAF)
+        VAF[i] ~ Normal(model_VAF_mat[i], sigma_m)
+      end
+    end
+    
+  
+    
+    
+    
+    function run_mcmc(model)
+        MCMC = sample(model, NUTS(), 300)
+        return MCMC
+    end
+    
+    function process_mcmc_samples(MCMC, data)
+        vaf_samples = []
+        cfhet_samples = []
+        cfhom_samples = []
+        
+        for i in 1:300
+            km_hom_sample = MCMC["km_hom"][i]
+            gamma_hom_ifn_sample = MCMC["gamma_hom_ifn"][i]
+            gamma_het_ifn_sample = MCMC["gamma_het_ifn"][i]
+            eta_het_sample = MCMC["eta_het"][i]
+            eta_hom_sample = MCMC["eta_hom"][i]
+            Delta_hom_ini_sample = MCMC["Delta_hom_ini"][i]
+            Delta_het_ini_sample = MCMC["Delta_het_ini"][i]
+            rho_Delta_hom_sample = MCMC["rho_Delta_hom"][i]
+            rho_Delta_het_sample = MCMC["rho_Delta_het"][i]
+            
+            theta_sample = km_hom_sample, eta_hom_sample, eta_het_sample, gamma_hom_ifn_sample, gamma_het_ifn_sample, Delta_hom_ini_sample, Delta_het_ini_sample, rho_Delta_hom_sample, rho_Delta_het_sample
+            extended_times = collect(1:1000)
+           
+           
+            sol_sample = computationnel_model_with_posology(theta_sample, extended_times, extended_times, data)
+    
+            cfhet_values = sol_sample[1]
+            cfhom_values = sol_sample[2]
+            vaf_values = sol_sample[3]
+    
+            push!(vaf_samples, vaf_values)
+            push!(cfhet_samples, cfhet_values)
+            push!(cfhom_samples, cfhom_values)
+        end
+        return vaf_samples, cfhet_samples, cfhom_samples
+    end
+
+
+
+function crps(samples, obs)
+    n = length(samples)
+    crps_sum = 0.0
+    for j in 1:n
+        crps_sum += crps_single(samples[j], obs[j])
+    end
+    return crps_sum / n
+end
+
+function crps_single(samples, obs)
+    n = length(samples)
+    sorted_samples = sort(samples)
+    crps = 0.0
+    for i in 1:n
+        crps += (sorted_samples[i] - obs)^2
+    end
+    crps /= n
+    crps += 0.5 * (sorted_samples[n] - sorted_samples[1])^2
+    return crps
+end
+
+function extract_subsets(samples, start_idx, end_idx)
+    return [sample[start_idx:end_idx] for sample in samples]
+end
+
+data = DataFrame(date = Int[], dosage = Float64[])
+vaf_samples1 = Float64[]
+vaf_samples2 = Float64[]
+vaf_samples3 = Float64[]
+vaf_samples4 = Float64[]
+vaf_samples5 = Float64[]
+vaf_samples6 = Float64[]
+vaf_samples7 = Float64[]
+vaf_samples8 = Float64[]
+vaf_samples9 = Float64[]
+vaf_samples10 = Float64[]
+vaf_samples11 = Float64[]
+vaf_samples12 = Float64[]
+
+
+cfhom_samples1 = Float64[]
+cfhom_samples2 = Float64[]
+cfhom_samples3 = Float64[]
+cfhom_samples4 = Float64[]
+cfhom_samples5 = Float64[]
+cfhom_samples6 = Float64[]
+cfhom_samples7 = Float64[]
+cfhom_samples8 = Float64[]
+cfhom_samples9 = Float64[]
+cfhom_samples10 = Float64[]
+cfhom_samples11 = Float64[]
+cfhom_samples12 = Float64[]
+
+cfhet_samples1 = Float64[]
+cfhet_samples2 = Float64[]
+cfhet_samples3 = Float64[]
+cfhet_samples4 = Float64[]
+cfhet_samples5 = Float64[]
+cfhet_samples6 = Float64[]
+cfhet_samples7 = Float64[]
+cfhet_samples8 = Float64[]
+cfhet_samples9 = Float64[]
+cfhet_samples10 = Float64[]
+cfhet_samples11 = Float64[]
+cfhet_samples12 = Float64[]
+
+
+obs_time_progenitor = collect(1:1000)
+obs_time_mature = collect(1:1000)
+
+vaf_real = DataFrame(Day= Int[], VAF= Float64[])
+cfhom_real = DataFrame(Day= Int[], CFhom= Float64[])
+cfhet_real = DataFrame(Day= Int[], CFhet= Float64[])
+
+sub1 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub2 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub3 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub4 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub5 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub6 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub7 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub8 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub9 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub10 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub11 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+sub12 = DataFrame(Day = Int[],VAF = Float64[],CFhet = Float64[] , CFhom = Float64[])
+
+days_of_interest_1 = []
+days_of_interest_2 = []
+days_of_interest_2 = []
+days_of_interest_4 = []
+days_of_interest_5 = []
+days_of_interest_6 = []
+days_of_interest_7 = []
+days_of_interest_8 = []
+days_of_interest_9 = []
+days_of_interest_10 = []
+days_of_interest_11 = []
+days_of_interest_12 = []
+
+for i in 1:1
+# Create the DataFrame
+data = DataFrame(date=[0, 24, 42, 56, 74, 143, 234, 388, 507, 690, 781, 904, 1090, 1466, 1613, 1788 , 1923 , 2003 ,2134,2395,2594,2677,2829,2910,3000],
+                 dosage=[45, 45, 45, 45, 45, 135.0, 135.0, 180.0, 180.0, 180.0, 180.0, 180.0, 90.0, 67.5, 45.0, 33.75,45.0 , 45.0,45.0 ,45.0,45.0,45.0,45.0,45.0,45.0])
+
+#Assume Design 3
+    data.dosage[data.date .>= 56] .= 180
+
+
+
+theta_r = (19.786419282546902, 0.44403945131939704, 2.0555299571816734, 0.030670017096167235, 0.053393238297615844, 0.035186034381110676, 0.4317472209785415, 1.9315065074445847, 8.821001597840201)
+ solution = computationnel_model_with_posology(theta_r, collect(1:1000), collect(1:1000), data)
+  synth_CFhet = solution[1]
+  synth_CFhom = solution[2]
+  synth_VAF = solution[3]
+
+
+
+  days = 1:1000
+  vaf_real = DataFrame(Day=days, VAF=synth_VAF)
+  cfhet_real = DataFrame(Day=days, CFhet=synth_CFhet)
+  cfhom_real = DataFrame(Day=days, CFhom=synth_CFhom)
+
+ σ = 0.02
+noisy_synth_CFhet = synth_CFhet .+ randn(length(synth_CFhet)) * σ
+noisy_synth_CFhom = synth_CFhom .+ randn(length(synth_CFhom)) * σ
+noisy_synth_VAF = synth_VAF .+ randn(length(synth_VAF)) * σ
+
+days = collect(1:1000)
+
+
+df_cfhet = DataFrame(observation_day = days, noisy_CFhet = noisy_synth_CFhet)
+df_cfhom = DataFrame(observation_day = days, noisy_CFhom = noisy_synth_CFhom)
+df_vaf = DataFrame(observation_day = days, noisy_VAF = noisy_synth_VAF)
+
+    
+categories = categorize_VAF_from_theta(theta_r,data)
+println("VAF Category: ", categories)
+
+# Define days of interest based on VAF category
+days_of_interest_1 = [1]
+
+days_of_interest_2 = [1,rand(21:41)]
+days_of_interest_3 = [1,rand(42:61)]
+
+
+
+
+subset_df1 = filter(row -> row.observation_day in days_of_interest_1, df_vaf)
+subset_df12 = filter(row -> row.observation_day in days_of_interest_1, df_cfhet)
+subset_df13 = filter(row -> row.observation_day in days_of_interest_1, df_cfhom)
+
+sub1 = DataFrame(Day = subset_df1.observation_day, VAF = subset_df1.noisy_VAF,CFhet =subset_df12.noisy_CFhet,CFhom =subset_df13.noisy_CFhom)
+
+
+model = inferring_MPN_dynamics(sub1.CFhet, sub1.CFhom, sub1.VAF, sub1.Day, sub1.Day, data, true)
+MCMC = run_mcmc(model)
+vaf_samples1, cfhet_samples1, cfhom_samples1 = process_mcmc_samples(MCMC, data)
+
+
+subset_df2 = filter(row -> row.observation_day in days_of_interest_2, df_vaf)
+subset_df22 = filter(row -> row.observation_day in days_of_interest_2, df_cfhet)
+subset_df23 = filter(row -> row.observation_day in days_of_interest_2, df_cfhom)
+
+sub2 = DataFrame(Day = subset_df2.observation_day, VAF = subset_df2.noisy_VAF,CFhet =subset_df22.noisy_CFhet,CFhom =subset_df23.noisy_CFhom)
+
+
+model = inferring_MPN_dynamics(sub2.CFhet, sub2.CFhom, sub2.VAF, sub2.Day, sub2.Day, data, true)
+MCMC = run_mcmc(model)
+vaf_samples2, cfhet_samples2, cfhom_samples2 = process_mcmc_samples(MCMC, data)
+
+subset_df3 = filter(row -> row.observation_day in days_of_interest_3, df_vaf)
+subset_df32 = filter(row -> row.observation_day in days_of_interest_3, df_cfhet)
+subset_df33 = filter(row -> row.observation_day in days_of_interest_3, df_cfhom)
+
+sub3 = DataFrame(Day = subset_df3.observation_day, VAF = subset_df3.noisy_VAF,CFhet =subset_df32.noisy_CFhet,CFhom =subset_df33.noisy_CFhom)
+
+
+model = inferring_MPN_dynamics(sub3.CFhet, sub3.CFhom, sub3.VAF, sub3.Day, sub3.Day, data, true)
+MCMC = run_mcmc(model)
+vaf_samples3, cfhet_samples3, cfhom_samples3 = process_mcmc_samples(MCMC, data)
+
+
+    
+# Define additional days of interest based on VAF category
+if categories[1] == "Reduced over time with small rate / bell"
+    days_of_interest_7 = [1, rand(215:265)]
+    days_of_interest_8 = [1, rand(265:315)]
+    days_of_interest_9 = [1,rand(315:340)]
+    
+
+elseif categories[1] == "Reduced over time with small rate / no bell"
+    days_of_interest_7 = [1, rand(325:375)]
+    days_of_interest_8 = [1, rand(375:425)]
+  
+        
+elseif categories[1] == "Reduced over time with high rate"
+    days_of_interest_7 = [1, rand(315:365)]
+    days_of_interest_8 = [1, rand(365:415)]
+ 
+
+elseif categories[1] == "Increased over time"
+    days_of_interest_7 = [1, rand(315:365)]
+    days_of_interest_8 = [1, rand(365:415)]
+ 
+elseif categories[1] == "Increased for some time and then reduced with small rate"
+    days_of_interest_7 = [1, rand(115:215)]
+    days_of_interest_8 = [1, rand(215:265)]
+    days_of_interest_9 = [1, rand(265:315)]
+    days_of_interest_10 = [1, rand(315:365)]
+            
+else categories[1] == "Increased for some time and then reduced with high rate"
+    days_of_interest_7 = [1, rand(165:215)]
+    days_of_interest_8 = [1, rand(215:265)]
+    days_of_interest_9 = [1, rand(265:315)]
+    days_of_interest_10 = [1,rand(315:365)]
+end
+
+# Create and process subdatasets for the additional subsets
+if !isempty(days_of_interest_7)
+
+        
+    subset_df7 = filter(row -> row.observation_day in days_of_interest_7, df_vaf)
+    subset_df71 = filter(row -> row.observation_day in days_of_interest_7, df_cfhet)
+    subset_df72 = filter(row -> row.observation_day in days_of_interest_7, df_cfhom)
+
+    sub7 = DataFrame(Day = subset_df7.observation_day, VAF = subset_df7.noisy_VAF,CFhet =subset_df71.noisy_CFhet,CFhom =subset_df72.noisy_CFhom)
+
+    model = inferring_MPN_dynamics( sub7.CFhet,sub7.CFhom,sub7.VAF,sub7.Day, sub7.Day, data, true)
+    MCMC = run_mcmc(model)
+    vaf_samples7, cfhet_samples7, cfhom_samples7 = process_mcmc_samples(MCMC, data)
+
+
+    subset_df8 = filter(row -> row.observation_day in days_of_interest_8, df_vaf)
+    subset_df81 = filter(row -> row.observation_day in days_of_interest_8, df_cfhet)
+    subset_df82 = filter(row -> row.observation_day in days_of_interest_8, df_cfhom)
+
+    sub8 = DataFrame(Day = subset_df8.observation_day, VAF = subset_df8.noisy_VAF,CFhet =subset_df81.noisy_CFhet,CFhom =subset_df82.noisy_CFhom)
+
+    model = inferring_MPN_dynamics( sub8.CFhet,sub8.CFhom,sub8.VAF,sub8.Day, sub8.Day, data, true)
+    MCMC = run_mcmc(model)
+    vaf_samples8, cfhet_samples8, cfhom_samples8 = process_mcmc_samples(MCMC, data)
+
+    subset_df9 = filter(row -> row.observation_day in days_of_interest_9, df_vaf)
+    subset_df91 = filter(row -> row.observation_day in days_of_interest_9, df_cfhet)
+    subset_df92 = filter(row -> row.observation_day in days_of_interest_9, df_cfhom)
+
+    sub9 = DataFrame(Day = subset_df9.observation_day, VAF = subset_df9.noisy_VAF,CFhet =subset_df91.noisy_CFhet,CFhom =subset_df92.noisy_CFhom)
+
+    model = inferring_MPN_dynamics( sub9.CFhet,sub9.CFhom,sub9.VAF,sub9.Day, sub9.Day, data, true)
+    MCMC = run_mcmc(model)
+    vaf_samples9, cfhet_samples9, cfhom_samples9 = process_mcmc_samples(MCMC, data)
+   
+
+
+    subset_df10 = filter(row -> row.observation_day in days_of_interest_10, df_vaf)
+    subset_df101 = filter(row -> row.observation_day in days_of_interest_10, df_cfhet)
+    subset_df102 = filter(row -> row.observation_day in days_of_interest_10, df_cfhom)
+
+    sub10 = DataFrame(Day = subset_df10.observation_day, VAF = subset_df10.noisy_VAF,CFhet =subset_df101.noisy_CFhet,CFhom =subset_df102.noisy_CFhom)
+
+    model = inferring_MPN_dynamics( sub10.CFhet,sub10.CFhom,sub10.VAF,sub10.Day, sub10.Day, data, true)
+    MCMC = run_mcmc(model)
+    vaf_samples10, cfhet_samples10, cfhom_samples10 = process_mcmc_samples(MCMC, data)
+
+
+end
+    
+crps_values1 = Float64[]
+crps_values2 = Float64[]
+
+    for i in 1:10
+        
+        samples = eval(Symbol("cfhet_samples$i"))
+        samples_subset = extract_subsets(samples, 450, 800)
+        real_values = cfhet_real.CFhet[450:800]
+        crps_value = crps(samples_subset, real_values)
+        println("CRPS for dataset $i: $crps_value")
+        push!(crps_values1, crps_value)
+    end
+
+    for i in 1:10
+        
+        samples = eval(Symbol("cfhom_samples$i"))
+        samples_subset = extract_subsets(samples, 450, 800)
+        real_values = cfhom_real.CFhom[450:800]
+
+        crps_value = crps(samples, real_values)
+        println("CRPS for dataset $i: $crps_value")
+        push!(crps_values2, crps_value)
+    end
+
+    # Define the weights for homozygous and heterozygous
+    weight_homozygous = 0.5
+    weight_heterozygous = 0.5
+
+    # Check that the weights sum to 1
+    if abs(weight_homozygous + weight_heterozygous - 1.0) > 1e-6
+        error("Weights must sum to 1")
+    end
+
+    # Compute the combined CRPS for each dataset using weighted averaging
+    combined_crps = []
+    for i in 1:length(crps_values2)
+        combined_score = weight_homozygous * crps_values1[i] + weight_heterozygous * crps_values2[i]
+        push!(combined_crps, combined_score)
+    end
+
+    # Rank the datasets based on the combined CRPS scores
+    ranked_indices = sortperm(combined_crps)
+
+    # Print the results
+    println("Combined CRPS Scores:")
+    for (i, score) in enumerate(combined_crps)
+        println("Dataset $i: $score")
+    end
+
+    println("\nRanked Datasets (Best to Worst):")
+    for i in ranked_indices
+        println("Dataset $i: Combined CRPS = $(combined_crps[i])")
+    end
+
+    push!(vaf_category ,categories[1])
+    push!(best_dataset , ranked_indices[1])
+    push!(best_combined_crps ,combined_crps[ranked_indices[1]])
+
+
+       
+end
