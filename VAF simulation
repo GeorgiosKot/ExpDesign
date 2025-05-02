@@ -1,0 +1,689 @@
+using Turing
+using Plots
+using CSV, DataFrames, Random
+using Statistics  
+using Distributions, QuadGK
+using StatsBase
+
+df_vaf_results = []
+theta_r_results = []
+data_results = []
+kl2_results = []
+kl3_results = []
+kl4_results = []
+kl5_results = []
+kl6_results = []
+kl7_results = []
+dic2_results = []
+dic3_results = []
+dic4_results = []
+dic5_results = []
+dic6_results = []
+dic7_results = []
+
+results_dataframe = DataFrame(
+    dataframe_VAF = Float64[])
+results_theta=DataFrame(theta_r = Float64[])
+results_poso = DataFrame(data = Float64[])
+results_kl_dic=DataFrame(kl2 = Float64[],
+    kl3 = Float64[],
+    kl4 = Float64[],
+    kl5 = Float64[],
+    kl6 = Float64[],
+    kl7 = Float64[],
+    dic2 = Float64[],
+    dic3 = Float64[],
+    dic4 = Float64[],
+    dic5 = Float64[],
+    dic6 = Float64[],
+    dic7 = Float64[])
+
+include("model_poso.jl") 
+
+
+@model function inferring_MPN_dynamics_synth( VAF, obs_time_mature, change_posology, homClones=true)
+
+  ### Parameters ###
+  km_hom ~ Uniform(1, 20); 
+    
+  gamma_hom_ifn ~ Uniform(1.0/300.0, 0.1)
+  gamma_het_ifn ~ Uniform(1.0/300.0, 0.1) 
+
+  eta_het ~ Uniform(0, 3)
+  eta_hom ~ Uniform(0, 3)
+
+  Delta_hom_ini ~ Uniform(0.0, 0.5)
+  Delta_het_ini ~ Uniform(0.0, 0.5)
+
+  rho_Delta_hom ~ Uniform(0.0, 10.0)
+  rho_Delta_het ~ Uniform(0.0, 10.0)
+    
+    
+  theta = km_hom, eta_hom, eta_het, gamma_hom_ifn, gamma_het_ifn, Delta_hom_ini, Delta_het_ini, rho_Delta_hom, rho_Delta_het
+
+  ### Compute theoretical dynamics ###
+  solution = computationnel_model_with_posology(theta,obs_time_mature, obs_time_mature, change_posology,true)
+
+  
+  model_VAF_mat = solution[3]
+    
+  ### Statistical model ###
+
+  sigma_m ~ Uniform(0.0,0.1)
+    
+  
+  for i in eachindex(VAF)
+    VAF[i] ~ Normal(model_VAF_mat[i], sigma_m)
+  end
+end
+
+
+function run_single_simulation(df, days_of_interest, num_iterations,data)
+    subset_df = filter(row -> row.observation_day in days_of_interest, df)
+    sub = DataFrame(Day = subset_df.observation_day, VAF = subset_df.noisy_VAF)
+    MCMC_s = sample(inferring_MPN_dynamics_synth(sub[!,:VAF], sub[!,:Day], data, true), NUTS(), num_iterations)
+
+    vaf_samples_new = []
+
+    for i in 1:length(MCMC_s)
+        # Extract parameters for this sample
+        km_hom_sample = MCMC_s["km_hom"][i]
+        gamma_hom_ifn_sample = MCMC_s["gamma_hom_ifn"][i]
+        gamma_het_ifn_sample = MCMC_s["gamma_het_ifn"][i]
+        eta_het_sample = MCMC_s["eta_het"][i]
+        eta_hom_sample = MCMC_s["eta_hom"][i]
+        Delta_hom_ini_sample = MCMC_s["Delta_hom_ini"][i]
+        Delta_het_ini_sample = MCMC_s["Delta_het_ini"][i]
+        rho_Delta_hom_sample = MCMC_s["rho_Delta_hom"][i]
+        rho_Delta_het_sample = MCMC_s["rho_Delta_het"][i]
+        sigma_m_sample = MCMC_s["sigma_m"][i]
+
+        theta_sample = (km_hom_sample, eta_hom_sample, eta_het_sample, gamma_hom_ifn_sample, gamma_het_ifn_sample, Delta_hom_ini_sample, Delta_het_ini_sample, rho_Delta_hom_sample, rho_Delta_het_sample)
+        extended_times = collect(0:3000)
+
+        sol_sample = computationnel_model_with_posology(theta_sample, extended_times, extended_times, data)
+
+        vaf_values = sol_sample[3]
+
+        push!(vaf_samples_new, vaf_values)
+    end
+
+    return vaf_samples_new
+end
+
+
+function compute_negative_log_likelihood(VAF::Vector{Float64}, model_VAF_mat::Vector{Float64}, sigma_m::Float64)
+    @assert length(VAF) == length(model_VAF_mat)
+    
+    N = length(VAF)
+    negative_log_likelihood = 0.0
+    
+    for i in 1:N
+        negative_log_likelihood += (VAF[i] - model_VAF_mat[i])^2 / sigma_m
+    end
+    
+    negative_log_likelihood = 0.5 * negative_log_likelihood + 0.5 * N * log(2 * 3.141592 * sigma_m)
+    
+    return negative_log_likelihood
+end
+
+function computedic(observed::Vector{Float64}, posterior_predictions::Vector{Vector{Float64}}, sigma_m::Float64)
+    n_samples = length(posterior_predictions)
+    deviances = [compute_negative_log_likelihood(observed, pred, sigma_m) for pred in posterior_predictions]
+    mean_deviance = mean(deviances)
+    mean_prediction = mean(hcat(posterior_predictions...)', dims=1)
+    mean_prediction = vec(mean_prediction)
+    deviance_at_mean = compute_negative_log_likelihood(observed, mean_prediction, sigma_m)
+    p_D = mean_deviance - deviance_at_mean
+    
+    dic = deviance_at_mean + 2 * p_D
+    
+    return dic
+end
+
+
+sub1 = DataFrame(Day = Int[],VAF = Float64[])
+vaf_real = DataFrame(Day= Int[], VAF= Float64[])
+dataframe_VAF = DataFrame(observation_day = Int[], noisy_VAF =  Float64[],real_VAF =  Float64[])
+theta_r = Any[]
+data = DataFrame(date = Int[], dosage = Float64[])
+days_of_interest = []    
+vaf_samples_1 = []
+
+dic2 = Float64[]  
+dic3 = Float64[]  
+dic4 = Float64[]  
+dic5 = Float64[]  
+dic6 = Float64[]  
+dic7 = Float64[]  
+
+
+kl2 = Float64[]
+kl3 = Float64[]
+kl4 = Float64[]
+kl5 = Float64[]
+kl6 = Float64[]
+kl7 = Float64[]
+
+for i in 1:N
+
+#Assuming we are in Design 2 ( 2 VAF observation and 2 IFNa posologies )
+days_of_interest = [1,rand(21:40)]
+data = DataFrame(
+    date=[0, 48, 62, 68, 74, 143, 234, 388, 507, 690, 781, 904, 1090, 1466, 1613, 1788, 1923, 2003, 2134, 2395, 2594, 2677, 2829, 2910, 3000],
+    dosage=[33.75, 67.5, 135, 90, 90, 135.0, 135.0, 180.0, 180.0, 180.0, 180.0, 180.0, 90.0, 67.5, 45.0, 33.75, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0]
+)
+
+possible_dosages = [33.75,45,67.5,90,135,180]
+random_dosage = rand(possible_dosages)
+data.dosage[data.date .>= 62] .= random_dosage
+data.dosage[1:2] .= rand(possible_dosages, 2)
+data
+
+ km_hom_r = rand(Uniform(1, 20))
+ gamma_hom_ifn_r = rand(Uniform(1.0/300.0, 0.1))
+ gamma_het_ifn_r = rand(Uniform(1.0/300.0, 0.1))
+ eta_het_r = rand(Uniform(0, 3))
+ eta_hom_r = rand(Uniform(0, 3))
+ Delta_hom_ini_r = rand(Uniform(0.0, 0.5))
+ Delta_het_ini_r = rand(Uniform(0.0, 0.5))
+ rho_Delta_hom_r = rand(Uniform(0.0, 10.0))
+ rho_Delta_het_r = rand(Uniform(0.0, 10.0))
+
+ theta_r = km_hom_r, eta_hom_r, eta_het_r, gamma_hom_ifn_r, gamma_het_ifn_r, Delta_hom_ini_r, Delta_het_ini_r, rho_Delta_hom_r, rho_Delta_het_r
+
+ 
+
+  solution = computationnel_model_with_posology(theta_r, collect(1:3000), collect(1:3000), data)
+  synth_VAF = solution[3]
+
+
+
+  days = 1:3000
+  vaf_real = DataFrame(Day=days, VAF=synth_VAF)
+
+ sg = 0.05
+ noisy_synth_VAF = synth_VAF .+ randn(length(synth_VAF)) * sg
+  noisy_synth_VAF = clamp.(noisy_synth_VAF, 0.001, 0.985)
+#An other noise model might be then more appropriate. To keep in mind maybe for later
+ days = collect(1:3000)
+ dataframe_VAF = DataFrame(observation_day = days, noisy_VAF = noisy_synth_VAF,real_VAF = vaf_real[!,:VAF])
+    
+subset_dataframe_VAF = filter(row -> row.observation_day in days_of_interest, dataframe_VAF)
+sub1 = DataFrame(Day = subset_dataframe_VAF.observation_day, VAF = subset_dataframe_VAF.noisy_VAF)
+
+num_iterations = 300
+
+
+MCMC_s_1 = sample(inferring_MPN_dynamics_synth(sub1[!,:VAF], sub1[!,:Day], data, true), NUTS(), num_iterations)
+
+
+# Iterate through each sample in the MCMC output
+for i in 1:length(MCMC_s_1)
+    # Extract parameters for this sample
+    km_hom_sample = MCMC_s_1["km_hom"][i]
+    gamma_hom_ifn_sample = MCMC_s_1["gamma_hom_ifn"][i]
+    gamma_het_ifn_sample = MCMC_s_1["gamma_het_ifn"][i]
+    eta_het_sample = MCMC_s_1["eta_het"][i]
+    eta_hom_sample = MCMC_s_1["eta_hom"][i]
+    Delta_hom_ini_sample = MCMC_s_1["Delta_hom_ini"][i]
+    Delta_het_ini_sample = MCMC_s_1["Delta_het_ini"][i]
+    rho_Delta_hom_sample = MCMC_s_1["rho_Delta_hom"][i]
+    rho_Delta_het_sample = MCMC_s_1["rho_Delta_het"][i]
+    sigma_m_sample = MCMC_s_1["sigma_m"][i]
+
+
+  theta_sample = km_hom_sample, eta_hom_sample, eta_het_sample, gamma_hom_ifn_sample, gamma_het_ifn_sample, Delta_hom_ini_sample, Delta_het_ini_sample, rho_Delta_hom_sample, rho_Delta_het_sample
+  extended_times = collect(0:3000)
+
+  sol_sample = computationnel_model_with_posology(theta_sample, 
+                                            extended_times, 
+                                            extended_times, 
+                                            data,
+                                            )
+
+  
+  vaf_values = sol_sample[3]
+
+    push!(vaf_samples_1, vaf_values)
+end
+
+
+all_results2 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(45:95))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results2, (days_of_interest = days_of_interest_extra, result = result))
+end
+
+for i in 1:10
+    posterior = [mean(all_results2[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results2[i].result)[346:700]))
+    push!(dic2, dic)
+end
+
+all_results3 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(95:145))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results3, (days_of_interest = days_of_interest_extra, result = result))
+end
+
+for i in 1:10
+    posterior = [mean(all_results3[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results3[i].result)[346:700]))
+    push!(dic3, dic)
+end
+
+all_results4 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(145:195))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results4, (days_of_interest = days_of_interest_extra, result = result))
+end
+
+for i in 1:10
+    posterior = [mean(all_results4[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results4[i].result)[346:700]))
+    push!(dic4, dic)
+end
+    
+all_results5 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(195:245))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results5, (days_of_interest = days_of_interest_extra, result = result))
+end
+for i in 1:10
+    posterior = [mean(all_results5[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results5[i].result)[346:700]))
+    push!(dic5, dic)
+end
+all_results6 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(245:295))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results6, (days_of_interest = days_of_interest_extra, result = result))
+end
+
+for i in 1:10
+    posterior = [mean(all_results6[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results6[i].result)[346:700]))
+    push!(dic6, dic)
+end
+
+all_results7 = []
+
+for i in 1:10
+    days_of_interest_extra = vcat(days_of_interest, rand(295:345))
+    num_iterations = 300
+    result = run_single_simulation(dataframe_VAF, days_of_interest, num_iterations,data)
+    push!(all_results7, (days_of_interest = days_of_interest_extra, result = result))
+end
+
+for i in 1:10
+    posterior = [mean(all_results7[i].result)[346:700]]
+    observed = vaf_real[!,:VAF][346:700]
+    observed = Float64[observed...]
+    dic = computedic(observed, posterior,mean(var(all_results7[i].result)[346:700]))
+    push!(dic7, dic)
+end
+
+vaf1 = [element[700] for element in vaf_samples_1]
+    
+vaf2 = Vector{Float64}[]
+for i in 1:10
+    result = all_results2[i]
+    vaf22 = [element[700] for element in result.result]
+    
+    push!(vaf2, vaf22)
+end
+vaf3 = Vector{Float64}[]
+for i in 1:10
+    result = all_results3[i]
+    vaf33 = [element[700] for element in result.result]
+    
+    push!(vaf3, vaf33)
+end
+vaf4 = Vector{Float64}[]
+for i in 1:10
+    result = all_results4[i]
+    vaf44 = [element[700] for element in result.result]
+    push!(vaf4, vaf44)
+end
+vaf5 = Vector{Float64}[]
+for i in 1:10
+    result = all_results5[i]
+    vaf55 = [element[700] for element in result.result]
+    push!(vaf5, vaf55)
+end
+vaf6 = Vector{Float64}[]
+for i in 1:10
+    result = all_results6[i]
+    vaf66 = [element[700] for element in result.result]
+    push!(vaf6, vaf66)
+end
+vaf7 = Vector{Float64}[]
+for i in 1:10
+    result = all_results7[i]
+    vaf77 = [element[700] for element in result.result]
+    push!(vaf7, vaf77)
+end
+
+
+VAF_at_time_of_interest1 = vaf1
+vaf_samples1 = Float64.(VAF_at_time_of_interest1)
+vaf_dist = fit(Normal, vaf_samples1)
+support = (0.0, 1.0)  
+pdf_vaf(x) = pdf(vaf_dist, x)
+kl_divergences = Dict{Int, Float64}()
+
+
+for i in 1:10
+    vaf_samples_var = vaf2[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    # Fit normal distribution to vaf_samples_var
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    
+   
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+   
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl2, kl_div)
+    catch e
+       
+        kl_div = 0.001  
+        kl_divergences[i] = kl_div
+        push!(kl2, kl_div)
+    end
+end
+
+
+for i in 1:10
+    vaf_samples_var = vaf3[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    # Fit normal distribution to vaf_samples_var
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    
+   
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+   
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl3, kl_div)
+    catch e
+       
+        kl_div = 0.001  
+        kl_divergences[i] = kl_div
+        push!(kl3, kl_div)
+    end
+end
+
+
+
+for i in 1:10
+    vaf_samples_var = vaf4[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    # Fit normal distribution to vaf_samples_var
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    
+   
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+   
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl4, kl_div)
+    catch e
+       
+        kl_div = 0.001  
+        kl_divergences[i] = kl_div
+        push!(kl4, kl_div)
+    end
+end
+
+for i in 1:10
+    vaf_samples_var = vaf5[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    # Fit normal distribution to vaf_samples_var
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    
+   
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+   
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl5, kl_div)
+    catch e
+       
+        kl_div = 0.001  
+        kl_divergences[i] = kl_div
+        push!(kl5, kl_div)
+    end
+end
+
+for i in 1:10
+    vaf_samples_var = vaf6[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    # Fit normal distribution to vaf_samples_var
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    
+   
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+   
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl6, kl_div)
+    catch e
+       
+        kl_div = 0.001  
+        kl_divergences[i] = kl_div
+        push!(kl6, kl_div)
+    end
+end
+
+for i in 1:10
+    vaf_samples_var = vaf7[i]
+    vaf_samples_var = Float64.(vaf_samples_var)
+    
+    
+    vaf_dist_i = fit(Normal, vaf_samples_var)
+    pdf_vaf_i(x) = pdf(vaf_dist_i, x)
+    support_min = minimum(vaf_samples_var)
+    support_max = maximum(vaf_samples_var)
+    support = (support_min, support_max)
+    
+    
+    try
+        kl_div = quadgk(x -> begin
+            p = pdf_vaf(x)
+            q = pdf_vaf_i(x)
+            if p == 0 || q == 0
+                return 0.0
+            else
+                return p * log(p / q)
+            end
+        end, support...)[1]
+        
+        if isinf(kl_div)
+            kl_div = 70
+        elseif isnan(kl_div)
+            kl_div = 0.001
+        end
+        
+        kl_div = abs(kl_div)
+        kl_divergences[i] = kl_div
+        push!(kl7, kl_div)
+    catch e
+        kl_div = 0.001 
+        kl_divergences[i] = kl_div
+        push!(kl7, kl_div)
+    end
+end
+
+push!(df_vaf_results,dataframe_VAF)
+push!(theta_r_results, theta_r)
+push!(data_results, data)
+    
+push!(kl2_results, kl2)
+push!(kl3_results, kl3)
+push!(kl4_results, kl4) 
+push!(kl5_results, kl5) 
+push!(kl6_results, kl6) 
+push!(kl7_results, kl7) 
+
+push!(dic2_results, dic2)
+push!(dic3_results, dic3)
+push!(dic4_results, dic4)
+push!(dic5_results, dic5)
+push!(dic6_results, dic6)
+push!(dic7_results, dic7)
+
+end
+
+results_dataframe = DataFrame(
+    dataframe_VAF = df_vaf_results)
+results_theta=DataFrame(theta_r = theta_r_results)
+results_poso = DataFrame(data = data_results)
+results_kl_dic=DataFrame(kl2 = kl2_results,
+    kl3 = kl3_results,
+    kl4 = kl4_results,
+    kl5 = kl5_results,
+    kl6 = kl6_results,
+    kl7 = kl7_results,
+    dic2 = dic2_results,
+    dic3 = dic3_results,
+    dic4 = dic4_results,
+    dic5 = dic5_results,
+    dic6 = dic6_results,
+    dic7 = dic7_results)
