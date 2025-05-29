@@ -31,7 +31,7 @@ function categorize_VAF(vaf_samples::Vector{Vector{Float64}})
         vaf_100_200 = vaf[100:200]
         vaf_200_300 = vaf[200:300]
 
-        vaf_2900_3000 = vaf[900:1000]
+        vaf_900_1000 = vaf[900:1000]
         vaf_200_500 = vaf[200:500]
         vaf_0_30 = vaf[1:30]
         vaf_0_150 = vaf[1:150]
@@ -42,7 +42,7 @@ function categorize_VAF(vaf_samples::Vector{Vector{Float64}})
 
         # Helper functions to check specific patterns
         function is_increased_over_time()
-            mean(initial_vaf) < mean(vaf_2900_3000)
+            mean(initial_vaf) < mean(vaf_900_1000)
         end
 
         function is_reduced_high_rate()
